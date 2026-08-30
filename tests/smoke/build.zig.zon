@@ -1,0 +1,13 @@
+.{
+    .name = .smoke,
+    .version = "0.0.0",
+    .fingerprint = 0x4946e97ac9c354bf,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+    .dependencies = .{
+        .cross = .{ .path = "../.." },
+    },
+}
