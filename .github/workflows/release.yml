@@ -45,8 +45,13 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          git archive --format=tar.gz --prefix="cross-${VERSION}/" \
-            -o "cross-${VERSION}.tar.gz" HEAD
+          # 仅打包 build.zig.zon 中 .paths 声明的路径(build.zig、src、LICENSE、README.md 等),
+          # 过滤掉 .github、tests、scripts 等非包内容,减小源码包体积。
+          # paths 从 build.zig.zon 动态解析,后续修改无需同步此脚本。
+          paths="$(sed -n '/\.paths = \.\{/,/^\s*\}/p' build.zig.zon \
+            | grep -o '"[^"]*"' | tr -d '"' | tr '\n' ' ')"
+          echo "打包路径:$paths"
+          git archive --format=tar.gz -o "cross-${VERSION}.tar.gz" HEAD $paths
 
       - name: 生成发布说明
         env:
