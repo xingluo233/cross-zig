@@ -75,7 +75,7 @@ jobs:
             echo ""
             echo "$heading"
             echo ""
-            git log --format="- [%h](https://github.com/${GITHUB_REPOSITORY}/commit/%h) %s" "$range"
+            git log --format="- [%h](https://github.com/${GITHUB_REPOSITORY}/commit/%h) %an: %s" "$range"
           } > notes.md
 
       - name: 创建 GitHub Release

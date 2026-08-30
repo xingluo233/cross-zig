@@ -295,9 +295,17 @@ fn createMergedStaticLibDir(
     }{
         .{ .src = if (crtbegin_from_api) lib_api_dir else lib_arch_dir, .name = "crtbegin_static.o", .dst = "crtbegin_static.o" },
         .{ .src = lib_api_dir, .name = "crtend_android.o", .dst = "crtend_android.o" },
+
+        .{ .src = lib_api_dir, .name = "crtbegin_so.o", .dst = "crtbegin_so.o" },
+        .{ .src = lib_api_dir, .name = "crtend_so.o", .dst = "crtend_so.o" },
+        .{ .src = lib_api_dir, .name = "crtbegin_dynamic.o", .dst = "crtbegin_dynamic.o" },
         .{ .src = lib_arch_dir, .name = "libc.a", .dst = "libc.a" },
         .{ .src = lib_arch_dir, .name = "libm.a", .dst = "libm.a" },
         .{ .src = lib_arch_dir, .name = "libdl.a", .dst = "libdl.a" },
+
+        .{ .src = lib_api_dir, .name = "libc.so", .dst = "libc.so" },
+        .{ .src = lib_api_dir, .name = "libm.so", .dst = "libm.so" },
+        .{ .src = lib_api_dir, .name = "libdl.so", .dst = "libdl.so" },
         .{ .src = clang_linux_dir, .name = builtins_src, .dst = "libbuiltins.a" },
         .{ .src = unwind_dir, .name = "libunwind.a", .dst = "libunwind.a" },
     };
@@ -312,7 +320,7 @@ fn createMergedStaticLibDir(
     }
     if (missing.len != 0) {
         std.log.err(
-            "Android NDK piece required for static libc linking is missing: '{s}' (arch {s}, API {d})",
+            "Android NDK piece required for libc linking is missing: '{s}' (arch {s}, API {d})",
             .{ missing, builtins_name, api_level },
         );
         return Error.StaticLibDirUnavailable;
@@ -355,10 +363,11 @@ pub fn configureCompile(compile: *std.Build.Step.Compile, paths: Paths, libc_fil
     }, libc_file);
 
     compile.root_module.addLibraryPath(.{ .cwd_relative = paths.static_lib_dir });
-    compile.root_module.linkSystemLibrary("unwind", .{ .preferred_link_mode = .static });
-    compile.root_module.linkSystemLibrary("builtins", .{ .preferred_link_mode = .static });
+
+    compile.root_module.linkSystemLibrary("unwind", .{});
+    compile.root_module.linkSystemLibrary("builtins", .{});
     if (paths.has_atomic) {
-        compile.root_module.linkSystemLibrary("atomic", .{ .preferred_link_mode = .static });
+        compile.root_module.linkSystemLibrary("atomic", .{});
     }
 }
 
