@@ -5,7 +5,7 @@
 include 路径、库搜索路径、libc 配置文件（`*-libc.conf`）、crt/运行时补丁和必要的编译宏，让
 `zig build` 能够真正完成交叉编译与链接。
 
-它不是独立程序，而是通过 path 依赖引入到你自己的 `build.zig` 中使用。
+它不是独立程序，而是作为依赖引入到你自己的 `build.zig` 中使用。
 
 ## 支持的平台
 
@@ -15,6 +15,16 @@ include 路径、库搜索路径、libc 配置文件（`*-libc.conf`）、crt/�
 | OpenHarmony (OHOS) | `*-linux-ohos` ABI，或 `-Dohos=true` + `*-linux-musl` | `OHOS_NDK_HOME`（或 `Options.ohos_sysroot`） | aarch64, arm/thumb, x86_64 |
 | Emscripten | `wasm32/64-emscripten` | `EMSDK`（或 `Options.emsdk_sysroot`） | wasm32, wasm64 |
 | Native | 其它所有目标 | 系统自带 | — |
+
+## 引入方式
+
+通过 GitHub Releases 引入，运行一次即可自动计算 hash 并写入 `build.zig.zon`：
+
+```powershell
+zig fetch --save=https://github.com/xingluo233/cross-zig/archive/refs/tags/v1.0.0.tar.gz
+```
+
+引入后，`build.zig` 中通过 `const cross = @import("cross");` 使用（见下节）。
 
 ## 快速开始
 
@@ -192,6 +202,7 @@ zig build test     # 或 zig test src/tests.zig
 
 ```
 build.zig          # 入口：导出 TargetConfig / Options 及各平台模块
+build.zig.zon      # 包定义：名称、版本（发版 tag 需与之一致）、paths
 src/
   target.zig       # 目标分类、TargetConfig 联合类型、宏注入
   platform.zig     # 公共逻辑：libc.conf 生成、目录检查、版本解析
@@ -200,6 +211,11 @@ src/
   emscripten.zig   # Emscripten：cache sysroot 解析、crt1 链接
   tests.zig        # 测试聚合入口
 tests/smoke/         # 端到端验证示例（C 源 + 多目标构建）
+scripts/
+  ci-smoke.sh      # 全目标冒烟矩阵脚本
+.github/workflows/
+  ci.yml           # CI：lint + 单测 + 冒烟矩阵
+  release.yml      # 自动发版：v* 标签触发，打包源码并发布变更说明
 ```
 
 ## 已知限制
