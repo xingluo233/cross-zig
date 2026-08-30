@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号,如 v1.0.0;留空则使用 build.zig.zon 中的版本'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 发布源码包
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: 解析版本号
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          zon_version="$(sed -n 's/.*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="$GITHUB_REF_NAME"
+            # tag 与 build.zig.zon 版本必须一致(都去掉 v 前缀后比较)
+            if [ "${version#v}" != "$zon_version" ]; then
+              echo "::error::标签 $version 与 build.zig.zon 的版本 $zon_version 不一致"
+              exit 1
+            fi
+          else
+            version="${INPUT_VERSION:-v$zon_version}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: 打包源码
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git archive --format=tar.gz --prefix="cross-${VERSION}/" \
+            -o "cross-${VERSION}.tar.gz" HEAD
+
+      - name: 生成发布说明
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # 上一个版本标签(按版本号降序,排除当前版本);首个发版则列出全部提交
+          prev="$(git tag --sort=-v:refname | grep -vxF "$VERSION" | head -n1)"
+          if [ -n "$prev" ]; then
+            range="$prev..HEAD"
+            heading="## 更新内容(自 $prev)"
+          else
+            range="HEAD"
+            heading="## 提交列表"
+          fi
+          {
+            echo "# cross $VERSION"
+            echo ""
+            echo "$heading"
+            echo ""
+            git log --format="- [%h](https://github.com/${GITHUB_REPOSITORY}/commit/%h) %s" "$range"
+          } > notes.md
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: cross ${{ steps.version.outputs.version }}
+          body_path: notes.md
+          files: |
+            cross-${{ steps.version.outputs.version }}.tar.gz

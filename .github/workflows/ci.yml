@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cross-compile:
+    name: Unit tests + cross-compile matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Zig 0.16
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Lint
+        run: |
+          curl -fsSL -o zlint \
+            "https://github.com/DonIsaac/zlint/releases/download/v0.9.1/zlint-linux-x86_64"
+          chmod +x ./zlint
+          ./zlint --deny-warnings
+
+      - name: Setup Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+
+      - name: Setup OpenHarmony SDK
+        id: ohos
+        uses: openharmony-rs/setup-ohos-sdk@v1
+        with:
+          version: '6.1'
+
+      - name: Setup Emscripten SDK
+        uses: emscripten-core/setup-emsdk@v16
+        with:
+          version: 6.0.8
+
+      - name: Generate Emscripten cache sysroots
+        run: |
+          # emcc builds its cache sysroot lazily; pre-generate both flavors so
+          # the zig wasm builds pick up a complete cache. wasm64 requires
+          # -sMEMORY64=1 (emcc has no -m64 handling); STANDALONE_WASM additionally
+          # emits crt1.o into the cache.
+          emcc tests/smoke/src/main.c -o ems32.js
+          emcc -sMEMORY64=1 -sSTANDALONE_WASM tests/smoke/src/main.c -o ems64.wasm
+          ls "$EMSDK/upstream/emscripten/cache/sysroot/lib/"
+
+      - name: Unit tests
+        run: zig build test
+
+      - name: Smoke compile matrix
+        run: bash scripts/ci-smoke.sh
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          OHOS_NDK_HOME: ${{ steps.ohos.outputs.ohos_sdk_native }}
+          EMSDK: ${{ env.EMSDK }}
