@@ -1,0 +1,13 @@
+.{
+    .name = .cross,
+    .version = "1.0.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x57131439c4540764,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}
