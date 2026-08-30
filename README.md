@@ -21,7 +21,7 @@ include 路径、库搜索路径、libc 配置文件（`*-libc.conf`）、crt/�
 通过 GitHub Releases 引入，运行一次即可自动计算 hash 并写入 `build.zig.zon`：
 
 ```powershell
-zig fetch --save=https://github.com/xingluo233/cross-zig/archive/refs/tags/v1.0.0.tar.gz
+zig fetch --save https://github.com/xingluo233/cross-zig/releases/download/v1.0.0/cross-v1.0.0.tar.gz
 ```
 
 引入后，`build.zig` 中通过 `const cross = @import("cross");` 使用（见下节）。
