@@ -45,11 +45,15 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          # 仅打包 build.zig.zon 中 .paths 声明的路径(build.zig、src、LICENSE、README.md 等),
-          # 过滤掉 .github、tests、scripts 等非包内容,减小源码包体积。
-          # paths 从 build.zig.zon 动态解析,后续修改无需同步此脚本。
-          paths="$(sed -n '/\.paths = \.\{/,/^\s*\}/p' build.zig.zon \
+          # 仅打包 build.zig.zon 中 .paths 声明的路径(build.zig、src、LICENSE、
+          # README.md 等),过滤 .github、tests、scripts 等非包内容,减小源码包体积。
+          # paths 动态解析;解析失败时显式报错,绝不悄悄打包整个仓库。
+          paths="$(grep -A30 '^[[:space:]]*\.paths' build.zig.zon \
             | grep -o '"[^"]*"' | tr -d '"' | tr '\n' ' ')"
+          if [ -z "$paths" ]; then
+            echo "::error::无法从 build.zig.zon 解析 .paths,请检查 build.zig.zon 格式"
+            exit 1
+          fi
           echo "打包路径:$paths"
           git archive --format=tar.gz -o "cross-${VERSION}.tar.gz" HEAD $paths
 
