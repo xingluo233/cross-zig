@@ -16,15 +16,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Setup Zig 0.16
+      - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Lint
         run: |
           curl -fsSL -o zlint \
-            "https://github.com/DonIsaac/zlint/releases/download/v0.9.1/zlint-linux-x86_64"
+            "https://github.com/DonIsaac/zlint/releases/download/v0.10.0/zlint-linux-x86_64"
           chmod +x ./zlint
           ./zlint --deny-warnings
 
@@ -32,18 +32,18 @@ jobs:
         id: ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r29
+          ndk-version: r30
 
       - name: Setup OpenHarmony SDK
         id: ohos
         uses: openharmony-rs/setup-ohos-sdk@v1
         with:
-          version: '6.1'
+          version: '7.0'
 
       - name: Setup Emscripten SDK
         uses: emscripten-core/setup-emsdk@v16
         with:
-          version: 6.0.8
+          version: 6.0.10
 
       - name: Generate Emscripten cache sysroots
         run: |

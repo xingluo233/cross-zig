@@ -9,19 +9,13 @@ pub const Paths = struct {
     include: []const u8,
     lib: []const u8,
     crt1: ?[]const u8 = null,
-
-    pub fn deinit(self: Paths, allocator: std.mem.Allocator) void {
-        allocator.free(self.include);
-        allocator.free(self.lib);
-        if (self.crt1) |p| allocator.free(p);
-    }
 };
 
 pub fn macros() [1]platform.Macro {
     return .{.{ .name = "__EMSCRIPTEN__", .value = "1" }};
 }
 
-pub fn targetTriple(cpu_arch: std.Target.Cpu.Arch) ?[]const u8 {
+fn targetTriple(cpu_arch: std.Target.Cpu.Arch) ?[]const u8 {
     return switch (cpu_arch) {
         .wasm32 => "wasm32-emscripten",
         .wasm64 => "wasm64-emscripten",
@@ -35,63 +29,33 @@ pub fn resolvePaths(b: *std.Build, target: std.Build.ResolvedTarget, sysroot: ?[
         return Error.UnsupportedTargetArchitecture;
     };
 
-    if (sysroot) |dir| return resolveExplicitSysroot(b, dir, triple);
+    if (sysroot) |dir| {
+        try platform.checkDir(b.graph.io, dir, "Emscripten sysroot (Options.emsdk_sysroot)");
+        return sysrootPaths(b, dir, triple);
+    }
 
     const emsdk_home = try platform.requireEnvDir(b, "EMSDK", "the Emscripten SDK root");
-
-    const emscripten_root = try std.fs.path.join(b.allocator, &.{ emsdk_home, "upstream", "emscripten" });
-    defer b.allocator.free(emscripten_root);
-
-    const cache_sysroot = try std.fs.path.join(b.allocator, &.{ emscripten_root, "cache", "sysroot" });
-    defer b.allocator.free(cache_sysroot);
-
-    const cache_include = try std.fs.path.join(b.allocator, &.{ cache_sysroot, "include" });
-    const cache_lib = try std.fs.path.join(b.allocator, &.{ cache_sysroot, "lib", triple });
-
-    if (!platform.dirExists(b.graph.io, cache_include)) {
-        std.log.err(
-            "Emscripten sysroot cache not found at {s}. Run `emcc -v` once to generate it, or point Options.emsdk_sysroot at a complete sysroot.",
-            .{cache_sysroot},
-        );
-        return Error.SysrootNotFound;
-    }
-    if (!platform.dirExists(b.graph.io, cache_lib)) {
-        std.log.err(
-            "Emscripten sysroot cache is incomplete: {s} is missing. Remove the cache and run `emcc -v` once to regenerate it, or point Options.emsdk_sysroot at a complete sysroot.",
-            .{cache_lib},
-        );
-        return Error.SysrootNotFound;
-    }
-
-    const cache_crt1 = try std.fs.path.join(b.allocator, &.{ cache_lib, "crt1.o" });
-    const has_crt1 = platform.pathExists(b.graph.io, cache_crt1);
-    if (!has_crt1) b.allocator.free(cache_crt1);
-    return .{
-        .include = cache_include,
-        .lib = cache_lib,
-        .crt1 = if (has_crt1) cache_crt1 else null,
-    };
+    return sysrootPaths(b, b.pathJoin(&.{ emsdk_home, "upstream", "emscripten", "cache", "sysroot" }), triple);
 }
 
-fn resolveExplicitSysroot(b: *std.Build, sysroot: []const u8, triple: []const u8) Error!Paths {
-    try platform.checkDir(b.graph.io, sysroot, "Emscripten sysroot (Options.emsdk_sysroot)");
-
-    const include = try std.fs.path.join(b.allocator, &.{ sysroot, "include" });
-    const lib_arch = try std.fs.path.join(b.allocator, &.{ sysroot, "lib", triple });
-
-    if (!platform.dirExists(b.graph.io, lib_arch)) {
+fn sysrootPaths(b: *std.Build, sysroot: []const u8, triple: []const u8) Error!Paths {
+    const io = b.graph.io;
+    const include = b.pathJoin(&.{ sysroot, "include" });
+    const lib = b.pathJoin(&.{ sysroot, "lib", triple });
+    if (!platform.dirExists(io, include) or !platform.dirExists(io, lib)) {
         std.log.err(
-            "Emscripten sysroot is incomplete: {s} is missing (expected the Emscripten sysroot layout: include/ and lib/{s}/).",
-            .{ lib_arch, triple },
+            "Emscripten sysroot at {s} is incomplete: expected include/ and lib/{s}/. Run `emcc -v` once to generate the cache sysroot, or point Options.emsdk_sysroot at a complete one.",
+            .{ sysroot, triple },
         );
         return Error.SysrootNotFound;
     }
-    try platform.checkDir(b.graph.io, include, "Emscripten sysroot include directory");
 
-    const crt1 = try std.fs.path.join(b.allocator, &.{ lib_arch, "crt1.o" });
-    const has_crt1 = platform.pathExists(b.graph.io, crt1);
-    if (!has_crt1) b.allocator.free(crt1);
-    return .{ .include = include, .lib = lib_arch, .crt1 = if (has_crt1) crt1 else null };
+    const crt1 = b.pathJoin(&.{ lib, "crt1.o" });
+    return .{
+        .include = include,
+        .lib = lib,
+        .crt1 = if (platform.pathExists(io, crt1)) crt1 else null,
+    };
 }
 
 pub fn configureCompile(compile: *std.Build.Step.Compile, paths: Paths, libc_file: std.Build.LazyPath) void {
@@ -103,7 +67,7 @@ pub fn configureCompile(compile: *std.Build.Step.Compile, paths: Paths, libc_fil
 
     if (paths.crt1) |crt1| {
         if (compile.kind != .obj) {
-            compile.root_module.addObjectFile(.{ .cwd_relative = crt1 });
+            compile.root_module.addObjectFile(compile.step.owner.graph.cwdRelativePath(crt1));
         }
     }
 }

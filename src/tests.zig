@@ -1,7 +1,13 @@
+const std = @import("std");
+
+const modules = .{
+    @import("target.zig"),
+    @import("platform.zig"),
+    @import("android.zig"),
+    @import("ohos.zig"),
+    @import("emscripten.zig"),
+};
+
 test {
-    _ = @import("target.zig");
-    _ = @import("platform.zig");
-    _ = @import("android.zig");
-    _ = @import("ohos.zig");
-    _ = @import("emscripten.zig");
+    inline for (modules) |m| std.testing.refAllDecls(m);
 }

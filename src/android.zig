@@ -9,21 +9,34 @@ pub const Error = platform.Error || error{
     StaticLibDirUnavailable,
 };
 
+pub const ArchNames = struct {
+    triple: []const u8,
+
+    builtins: []const u8,
+
+    unwind: []const u8,
+};
+
+pub fn archNames(cpu_arch: std.Target.Cpu.Arch) ?ArchNames {
+    return switch (cpu_arch) {
+        .aarch64 => .{ .triple = "aarch64-linux-android", .builtins = "aarch64", .unwind = "aarch64" },
+        .x86_64 => .{ .triple = "x86_64-linux-android", .builtins = "x86_64", .unwind = "x86_64" },
+        .x86 => .{ .triple = "i686-linux-android", .builtins = "i686", .unwind = "i386" },
+        .arm, .thumb => .{ .triple = "arm-linux-androideabi", .builtins = "arm", .unwind = "arm" },
+        .riscv64 => .{ .triple = "riscv64-linux-android", .builtins = "riscv64", .unwind = "riscv64" },
+        else => null,
+    };
+}
+
 pub const Paths = struct {
     include: []const u8,
     include_arch: []const u8,
     lib_arch: []const u8,
     lib_api: []const u8,
     static_lib_dir: []const u8,
-    has_atomic: bool = false,
 
-    pub fn deinit(self: Paths, allocator: std.mem.Allocator) void {
-        allocator.free(self.include);
-        allocator.free(self.include_arch);
-        allocator.free(self.lib_arch);
-        allocator.free(self.lib_api);
-        allocator.free(self.static_lib_dir);
-    }
+    api_level: []const u8,
+    has_atomic: bool = false,
 };
 
 pub fn macros(api_level: []const u8) [3]platform.Macro {
@@ -34,7 +47,7 @@ pub fn macros(api_level: []const u8) [3]platform.Macro {
     };
 }
 
-pub fn hostOsName(host_os: std.Target.Os.Tag) ?[]const u8 {
+fn hostOsName(host_os: std.Target.Os.Tag) ?[]const u8 {
     return switch (host_os) {
         .windows => "windows",
         .linux => "linux",
@@ -43,21 +56,10 @@ pub fn hostOsName(host_os: std.Target.Os.Tag) ?[]const u8 {
     };
 }
 
-pub fn hostArchName(host_arch: std.Target.Cpu.Arch) ?[]const u8 {
+fn hostArchName(host_arch: std.Target.Cpu.Arch) ?[]const u8 {
     return switch (host_arch) {
         .x86_64 => "x86_64",
         .aarch64 => "aarch64",
-        else => null,
-    };
-}
-
-pub fn targetArchName(cpu_arch: std.Target.Cpu.Arch) ?[]const u8 {
-    return switch (cpu_arch) {
-        .aarch64 => "aarch64-linux-android",
-        .x86_64 => "x86_64-linux-android",
-        .arm, .thumb => "arm-linux-androideabi",
-        .x86 => "i686-linux-android",
-        .riscv64 => "riscv64-linux-android",
         else => null,
     };
 }
@@ -66,44 +68,43 @@ pub fn resolvePaths(b: *std.Build, target: std.Build.ResolvedTarget, sysroot: ?[
     const api_level = target.result.os.version_range.linux.android;
     const cpu_arch = target.result.cpu.arch;
 
-    const sysroot_path = try resolveSysroot(b, sysroot);
-    defer b.allocator.free(sysroot_path);
-
-    const target_arch = targetArchName(cpu_arch) orelse {
+    const arch = archNames(cpu_arch) orelse {
         std.log.err("Unsupported target arch: {s}", .{@tagName(cpu_arch)});
         return Error.UnsupportedTargetArchitecture;
     };
 
-    const include = try std.fs.path.join(b.allocator, &.{ sysroot_path, "usr", "include" });
-    const include_arch = try std.fs.path.join(b.allocator, &.{ sysroot_path, "usr", "include", target_arch });
-    const lib_arch = try std.fs.path.join(b.allocator, &.{ sysroot_path, "usr", "lib", target_arch });
-    const api_str = try std.fmt.allocPrint(b.allocator, "{d}", .{api_level});
-    defer b.allocator.free(api_str);
-    const lib_api = try std.fs.path.join(b.allocator, &.{ lib_arch, api_str });
+    const sysroot_path = try resolveSysroot(b, sysroot);
+
+    const include = b.pathJoin(&.{ sysroot_path, "usr", "include" });
+    const include_arch = b.pathJoin(&.{ sysroot_path, "usr", "include", arch.triple });
+    const lib_arch = b.pathJoin(&.{ sysroot_path, "usr", "lib", arch.triple });
+    const api_level_str = b.fmt("{d}", .{api_level});
+    const lib_api = b.pathJoin(&.{ lib_arch, api_level_str });
+
     try platform.checkDir(b.graph.io, include, "Android include directory");
     try platform.checkDir(b.graph.io, include_arch, "Android architecture include directory");
     try platform.checkDir(b.graph.io, lib_arch, "Android architecture library");
     if (!platform.dirExists(b.graph.io, lib_api)) {
         std.log.err("Android API library directory not found: {s}", .{lib_api});
-
         logAvailableApiDirs(b, lib_arch);
         return Error.SysrootNotFound;
     }
 
-    const layout = try createMergedStaticLibDir(b, cpu_arch, api_level, sysroot_path, lib_arch, lib_api);
+    const layout = try createMergedStaticLibDir(b, arch, api_level, sysroot_path, lib_arch, lib_api);
     return .{
         .include = include,
         .include_arch = include_arch,
         .lib_arch = lib_arch,
         .lib_api = lib_api,
         .static_lib_dir = layout.dir,
+        .api_level = api_level_str,
         .has_atomic = layout.has_atomic,
     };
 }
 
 const Layout = struct {
     dir: []const u8,
-    has_atomic: bool = false,
+    has_atomic: bool,
 };
 
 fn logAvailableApiDirs(b: *std.Build, lib_arch: []const u8) void {
@@ -112,136 +113,58 @@ fn logAvailableApiDirs(b: *std.Build, lib_arch: []const u8) void {
     defer dir.close(io);
 
     var names: std.ArrayList([]const u8) = .empty;
-    defer {
-        for (names.items) |n| b.allocator.free(n);
-        names.deinit(b.allocator);
-    }
     var it = dir.iterate();
-    while (true) {
-        const maybe_entry = it.next(io) catch break;
-        const entry = maybe_entry orelse break;
+    while (it.next(io) catch null) |entry| {
         if (entry.kind != .directory) continue;
-        names.append(b.allocator, b.allocator.dupe(u8, entry.name) catch return) catch return;
+        names.append(b.allocator, b.graph.dupeString(entry.name)) catch return;
     }
     if (names.items.len == 0) return;
 
     std.mem.sort([]const u8, names.items, {}, struct {
-        fn lessThan(_: void, x: []const u8, y: []const u8) bool {
-            return std.mem.lessThan(u8, x, y);
+        fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+            return std.mem.lessThan(u8, lhs, rhs);
         }
     }.lessThan);
 
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(b.allocator);
-    for (names.items, 0..) |n, i| {
-        if (i != 0) list.appendSlice(b.allocator, ", ") catch return;
-        list.appendSlice(b.allocator, n) catch return;
-    }
-    std.log.err("  actual API levels in {s}: {s}", .{ lib_arch, list.items });
-
+    const levels = std.mem.join(b.allocator, ", ", names.items) catch return;
+    std.log.err("  actual API levels in {s}: {s}", .{ lib_arch, levels });
     if (names.items.len == 1) {
-        std.log.err("  hint: this architecture ships a single API level ({s}); use -Dtarget={s}.{s}", .{ names.items[0], std.fs.path.basename(lib_arch), names.items[0] });
+        std.log.err("  hint: this architecture ships a single API level ({s}); use -Dtarget={s}.{s}", .{
+            names.items[0], std.Io.Dir.path.basename(lib_arch), names.items[0],
+        });
     }
 }
 
-fn builtinsName(cpu_arch: std.Target.Cpu.Arch) ?[]const u8 {
-    return switch (cpu_arch) {
-        .aarch64 => "aarch64",
-        .x86_64 => "x86_64",
-        .x86 => "i686",
-        .arm, .thumb => "arm",
-        .riscv64 => "riscv64",
-        else => null,
-    };
-}
+fn clangLinuxLibDir(b: *std.Build, sysroot_path: []const u8) ?[]const u8 {
+    const toolchain_root = std.Io.Dir.path.dirname(sysroot_path) orelse return null;
+    const clang_root = b.pathJoin(&.{ toolchain_root, "lib", "clang" });
 
-fn unwindDir(cpu_arch: std.Target.Cpu.Arch) ?[]const u8 {
-    return switch (cpu_arch) {
-        .aarch64 => "aarch64",
-        .x86_64 => "x86_64",
-        .x86 => "i386",
-        .arm, .thumb => "arm",
-        .riscv64 => "riscv64",
-        else => null,
-    };
-}
-
-fn clangLinuxLibDir(b: *std.Build, sysroot_path: []const u8) Error!?[]const u8 {
-    const io = b.graph.io;
-    const toolchain_root = std.fs.path.dirname(sysroot_path) orelse return null;
-    const clang_root = try std.fs.path.join(b.allocator, &.{ toolchain_root, "lib", "clang" });
-    defer b.allocator.free(clang_root);
-
-    var clang_dir = std.Io.Dir.openDirAbsolute(io, clang_root, .{ .iterate = true }) catch |err| {
-        std.log.warn("Android NDK clang dir not found at {s} ({s}); static libc linking may fail", .{ clang_root, @errorName(err) });
-        return null;
-    };
-    defer clang_dir.close(io);
-
-    const Best = struct { version: [3]u32, path: []const u8 };
-    var best: ?Best = null;
-    var it = clang_dir.iterate();
-    while (true) {
-        const maybe_entry = it.next(io) catch break;
-        const entry = maybe_entry orelse break;
-        if (entry.kind != .directory) continue;
-        const version = platform.parseVersion(entry.name) orelse continue;
-        const linux_dir = try std.fs.path.join(b.allocator, &.{ clang_root, entry.name, "lib", "linux" });
-        if (!platform.dirExists(io, linux_dir)) {
-            b.allocator.free(linux_dir);
-            continue;
-        }
-        if (best == null or platform.versionNewer(version, best.?.version)) {
-            if (best) |old| b.allocator.free(old.path);
-            best = .{ .version = version, .path = linux_dir };
-        } else {
-            b.allocator.free(linux_dir);
-        }
+    const found = platform.findNewestVersionedSubdir(b.allocator, b.graph.io, clang_root, &.{ "lib", "linux" });
+    if (found == null) {
+        std.log.warn(
+            "Android NDK clang runtime libraries not found under {s} (expected <clang>/<version>/lib/linux); static libc linking may fail",
+            .{clang_root},
+        );
     }
-
-    if (best) |found| return found.path;
-
-    std.log.warn(
-        "Android NDK clang runtime libraries not found under {s}; static libc linking may fail",
-        .{clang_root},
-    );
-    return null;
+    return found;
 }
 
-fn dirExistsIn(dir: std.Io.Dir, io: std.Io, path: []const u8) bool {
-    const d = dir.openDir(io, path, .{}) catch return false;
-    d.close(io);
-    return true;
-}
-
-fn copyIfMissing(io: std.Io, src_dir: std.Io.Dir, src_name: []const u8, dst_dir: std.Io.Dir, dst_name: []const u8) bool {
-    if (dst_dir.access(io, dst_name, .{})) |_| {
-        return true;
-    } else |err| switch (err) {
-        error.FileNotFound => {},
-        else => return false,
-    }
-    std.Io.Dir.copyFile(src_dir, src_name, dst_dir, dst_name, io, .{}) catch return false;
-    return true;
-}
-
-pub fn mergedDirName(
+fn mergedDirName(
     allocator: std.mem.Allocator,
-    cpu_arch: std.Target.Cpu.Arch,
+    builtins_name: []const u8,
     api_level: u32,
     sysroot_path: []const u8,
-) std.mem.Allocator.Error!?[]const u8 {
-    const name = builtinsName(cpu_arch) orelse return null;
-    return try std.fmt.allocPrint(allocator, "cross-android-{s}-{d}-{x}", .{
-        name,
+) []const u8 {
+    return allocator.print("cross-android-{s}-{d}-{x}", .{
+        builtins_name,
         api_level,
         std.hash.Wyhash.hash(0, sysroot_path),
-    });
+    }) catch @panic("OOM");
 }
 
 fn createMergedStaticLibDir(
     b: *std.Build,
-    cpu_arch: std.Target.Cpu.Arch,
+    arch: ArchNames,
     api_level: u32,
     sysroot_path: []const u8,
     lib_arch: []const u8,
@@ -249,92 +172,85 @@ fn createMergedStaticLibDir(
 ) Error!Layout {
     const io = b.graph.io;
 
-    const builtins_name = builtinsName(cpu_arch) orelse return Error.UnsupportedTargetArchitecture;
-    const arch_name = unwindDir(cpu_arch) orelse return Error.UnsupportedTargetArchitecture;
+    const clang_linux_path = clangLinuxLibDir(b, sysroot_path) orelse return Error.StaticLibDirUnavailable;
+    const dir_name = mergedDirName(b.allocator, arch.builtins, api_level, sysroot_path);
 
-    const clang_linux = try clangLinuxLibDir(b, sysroot_path);
-    defer if (clang_linux) |dir| b.allocator.free(dir);
-    if (clang_linux == null) return Error.StaticLibDirUnavailable;
-
-    const dir_name = try mergedDirName(b.allocator, cpu_arch, api_level, sysroot_path) orelse return Error.UnsupportedTargetArchitecture;
-    const cache_dir = b.cache_root.handle;
-    if (!dirExistsIn(cache_dir, io, dir_name)) {
-        cache_dir.createDirPath(io, dir_name) catch |err| {
-            std.log.err("failed to create {s} in the zig cache: {s}", .{ dir_name, @errorName(err) });
-            return Error.StaticLibDirUnavailable;
-        };
-    }
-
-    const dest_rel = if (b.cache_root.path) |p|
-        try std.fs.path.join(b.allocator, &.{ p, dir_name })
-    else
-        try b.allocator.dupe(u8, dir_name);
-
-    var lib_api_dir = std.Io.Dir.openDirAbsolute(io, lib_api, .{}) catch return Error.StaticLibDirUnavailable;
-    defer lib_api_dir.close(io);
-    var lib_arch_dir = std.Io.Dir.openDirAbsolute(io, lib_arch, .{}) catch return Error.StaticLibDirUnavailable;
-    defer lib_arch_dir.close(io);
-
-    const crtbegin_from_api = platform.pathExists(io, try std.fs.path.join(b.allocator, &.{ lib_api, "crtbegin_static.o" }));
-
-    const clang_linux_dir = std.Io.Dir.openDirAbsolute(io, clang_linux.?, .{}) catch return Error.StaticLibDirUnavailable;
-    defer clang_linux_dir.close(io);
-    const builtins_src = try std.fmt.allocPrint(b.allocator, "libclang_rt.builtins-{s}-android.a", .{builtins_name});
-    defer b.allocator.free(builtins_src);
-
-    var unwind_dir = std.Io.Dir.openDirAbsolute(io, try std.fs.path.join(b.allocator, &.{ clang_linux.?, arch_name }), .{}) catch |err| {
-        std.log.err("Android NDK unwind library dir not found at {s}/{s}: {s}", .{ clang_linux.?, arch_name, @errorName(err) });
+    const cache_dir = try platform.openStagingDir(b);
+    defer cache_dir.close(io);
+    cache_dir.createDirPath(io, dir_name) catch |err| {
+        std.log.err("failed to create {s} in the local cache: {s}", .{ dir_name, @errorName(err) });
         return Error.StaticLibDirUnavailable;
     };
-    defer unwind_dir.close(io);
+
+    var lib_api_dir = std.Io.Dir.openDirAbsolute(io, lib_api, .{}) catch |err| {
+        std.log.err("failed to open the Android API library directory {s}: {s}", .{ lib_api, @errorName(err) });
+        return Error.StaticLibDirUnavailable;
+    };
+    defer lib_api_dir.close(io);
+    var lib_arch_dir = std.Io.Dir.openDirAbsolute(io, lib_arch, .{}) catch |err| {
+        std.log.err("failed to open the Android architecture library directory {s}: {s}", .{ lib_arch, @errorName(err) });
+        return Error.StaticLibDirUnavailable;
+    };
+    defer lib_arch_dir.close(io);
+
+    const crtbegin_in_api = platform.pathExists(io, b.pathJoin(&.{ lib_api, "crtbegin_static.o" }));
+
+    const clang_linux_dir = std.Io.Dir.openDirAbsolute(io, clang_linux_path, .{}) catch |err| {
+        std.log.err("failed to open the Android clang runtime directory {s}: {s}", .{ clang_linux_path, @errorName(err) });
+        return Error.StaticLibDirUnavailable;
+    };
+    defer clang_linux_dir.close(io);
+
+    const builtins_src = b.fmt("libclang_rt.builtins-{s}-android.a", .{arch.builtins});
+
+    const unwind_lib_path = b.pathJoin(&.{ clang_linux_path, arch.unwind });
+    var unwind_lib_dir = std.Io.Dir.openDirAbsolute(io, unwind_lib_path, .{}) catch |err| {
+        std.log.err("Android NDK unwind library dir not found at {s}: {s}", .{ unwind_lib_path, @errorName(err) });
+        return Error.StaticLibDirUnavailable;
+    };
+    defer unwind_lib_dir.close(io);
 
     const copies = [_]struct {
         src: std.Io.Dir,
         name: []const u8,
-        dst: []const u8,
+        dst: ?[]const u8 = null,
     }{
-        .{ .src = if (crtbegin_from_api) lib_api_dir else lib_arch_dir, .name = "crtbegin_static.o", .dst = "crtbegin_static.o" },
-        .{ .src = lib_api_dir, .name = "crtend_android.o", .dst = "crtend_android.o" },
-
-        .{ .src = lib_api_dir, .name = "crtbegin_so.o", .dst = "crtbegin_so.o" },
-        .{ .src = lib_api_dir, .name = "crtend_so.o", .dst = "crtend_so.o" },
-        .{ .src = lib_api_dir, .name = "crtbegin_dynamic.o", .dst = "crtbegin_dynamic.o" },
-        .{ .src = lib_arch_dir, .name = "libc.a", .dst = "libc.a" },
-        .{ .src = lib_arch_dir, .name = "libm.a", .dst = "libm.a" },
-        .{ .src = lib_arch_dir, .name = "libdl.a", .dst = "libdl.a" },
-
-        .{ .src = lib_api_dir, .name = "libc.so", .dst = "libc.so" },
-        .{ .src = lib_api_dir, .name = "libm.so", .dst = "libm.so" },
-        .{ .src = lib_api_dir, .name = "libdl.so", .dst = "libdl.so" },
+        .{ .src = if (crtbegin_in_api) lib_api_dir else lib_arch_dir, .name = "crtbegin_static.o" },
+        .{ .src = lib_api_dir, .name = "crtend_android.o" },
+        .{ .src = lib_api_dir, .name = "crtbegin_so.o" },
+        .{ .src = lib_api_dir, .name = "crtend_so.o" },
+        .{ .src = lib_api_dir, .name = "crtbegin_dynamic.o" },
+        .{ .src = lib_arch_dir, .name = "libc.a" },
+        .{ .src = lib_arch_dir, .name = "libm.a" },
+        .{ .src = lib_arch_dir, .name = "libdl.a" },
+        .{ .src = lib_api_dir, .name = "libc.so" },
+        .{ .src = lib_api_dir, .name = "libm.so" },
+        .{ .src = lib_api_dir, .name = "libdl.so" },
         .{ .src = clang_linux_dir, .name = builtins_src, .dst = "libbuiltins.a" },
-        .{ .src = unwind_dir, .name = "libunwind.a", .dst = "libunwind.a" },
+        .{ .src = unwind_lib_dir, .name = "libunwind.a" },
     };
 
-    var missing: []const u8 = "";
     for (copies) |c| {
-        const dst_path = try std.fs.path.join(b.allocator, &.{ dir_name, c.dst });
-        if (!copyIfMissing(io, c.src, c.name, cache_dir, dst_path)) {
-            missing = c.name;
-            break;
-        }
-    }
-    if (missing.len != 0) {
-        std.log.err(
-            "Android NDK piece required for libc linking is missing: '{s}' (arch {s}, API {d})",
-            .{ missing, builtins_name, api_level },
-        );
-        return Error.StaticLibDirUnavailable;
+        const dst_path = b.pathJoin(&.{ dir_name, c.dst orelse c.name });
+        platform.copyFileIfMissing(io, c.src, c.name, cache_dir, dst_path) catch |err| {
+            std.log.err(
+                "Android NDK piece required for libc linking is missing: '{s}' (arch {s}, API {d}): {s}",
+                .{ c.name, arch.builtins, api_level, @errorName(err) },
+            );
+            return Error.StaticLibDirUnavailable;
+        };
     }
 
-    const has_atomic = copyIfMissing(io, unwind_dir, "libatomic.a", cache_dir, try std.fs.path.join(b.allocator, &.{ dir_name, "libatomic.a" }));
+    const atomic_dst = b.pathJoin(&.{ dir_name, "libatomic.a" });
+    const has_atomic = if (platform.copyFileIfMissing(io, unwind_lib_dir, "libatomic.a", cache_dir, atomic_dst)) |_| true else |_| false;
 
-    return .{ .dir = dest_rel, .has_atomic = has_atomic };
+    return .{ .dir = platform.stagingPath(b, dir_name), .has_atomic = has_atomic };
 }
 
 fn resolveSysroot(b: *std.Build, explicit: ?[]const u8) Error![]const u8 {
     if (explicit) |path| {
         try platform.checkDir(b.graph.io, path, "Android sysroot (Options.android_sysroot)");
-        return try b.allocator.dupe(u8, path);
+        return path;
     }
 
     const ndk_home = try platform.requireEnvDir(b, "ANDROID_NDK_HOME", "the Android NDK root");
@@ -346,10 +262,9 @@ fn resolveSysroot(b: *std.Build, explicit: ?[]const u8) Error![]const u8 {
         std.log.err("Unsupported host arch: {s}", .{@tagName(builtin.cpu.arch)});
         return Error.UnsupportedHostArchitecture;
     };
-    const host_tag = b.fmt("{s}-{s}", .{ host_os, host_arch });
 
-    const sysroot = try std.fs.path.join(b.allocator, &.{
-        ndk_home, "toolchains", "llvm", "prebuilt", host_tag, "sysroot",
+    const sysroot = b.pathJoin(&.{
+        ndk_home, "toolchains", "llvm", "prebuilt", b.fmt("{s}-{s}", .{ host_os, host_arch }), "sysroot",
     });
     try platform.checkDir(b.graph.io, sysroot, "Android sysroot");
     return sysroot;
@@ -359,15 +274,13 @@ pub fn configureCompile(compile: *std.Build.Step.Compile, paths: Paths, libc_fil
     platform.configureCompile(compile, .{
         .include = paths.include,
         .include_arch = paths.include_arch,
-        .lib = &.{ paths.lib_api, paths.lib_arch },
+        .lib = &.{ paths.lib_api, paths.lib_arch, paths.static_lib_dir },
     }, libc_file);
 
-    compile.root_module.addLibraryPath(.{ .cwd_relative = paths.static_lib_dir });
-
-    compile.root_module.linkSystemLibrary("unwind", .{});
-    compile.root_module.linkSystemLibrary("builtins", .{});
+    compile.root_module.linkSystemLibrary("unwind", .{ .use_pkg_config = .no });
+    compile.root_module.linkSystemLibrary("builtins", .{ .use_pkg_config = .no });
     if (paths.has_atomic) {
-        compile.root_module.linkSystemLibrary("atomic", .{});
+        compile.root_module.linkSystemLibrary("atomic", .{ .use_pkg_config = .no });
     }
 }
 
@@ -393,31 +306,25 @@ test "host arch names" {
     try std.testing.expect(hostArchName(.wasm32) == null);
 }
 
-test "merged dir names are scoped to arch + api + sysroot" {
-    const a1 = try mergedDirName(std.testing.allocator, .aarch64, 35, "/ndk") orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(a1);
-    const a2 = try mergedDirName(std.testing.allocator, .aarch64, 36, "/ndk") orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(a2);
-    const other_ndk = try mergedDirName(std.testing.allocator, .aarch64, 35, "/other-ndk") orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(other_ndk);
-    const rv = try mergedDirName(std.testing.allocator, .riscv64, 35, "/ndk") orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(rv);
+test "arch names" {
+    const aarch64 = archNames(.aarch64).?;
+    try std.testing.expectEqualStrings("aarch64-linux-android", aarch64.triple);
+    try std.testing.expectEqualStrings("aarch64", aarch64.builtins);
+    try std.testing.expectEqualStrings("aarch64", aarch64.unwind);
 
-    try std.testing.expect(!std.mem.eql(u8, a1, a2));
-    try std.testing.expect(!std.mem.eql(u8, a1, other_ndk));
-    try std.testing.expect(!std.mem.eql(u8, a1, rv));
-    try std.testing.expect(std.mem.eql(u8, a1, a1));
-    try std.testing.expect((try mergedDirName(std.testing.allocator, .mips, 35, "/ndk")) == null);
-}
+    const thumb = archNames(.thumb).?;
+    try std.testing.expectEqualStrings("arm-linux-androideabi", thumb.triple);
+    try std.testing.expectEqualStrings("arm", thumb.builtins);
+    try std.testing.expectEqualStrings("arm", thumb.unwind);
 
-test "Android target arch names" {
-    try std.testing.expectEqualStrings("aarch64-linux-android", targetArchName(.aarch64).?);
-    try std.testing.expectEqualStrings("x86_64-linux-android", targetArchName(.x86_64).?);
-    try std.testing.expectEqualStrings("arm-linux-androideabi", targetArchName(.arm).?);
-    try std.testing.expectEqualStrings("arm-linux-androideabi", targetArchName(.thumb).?);
-    try std.testing.expectEqualStrings("i686-linux-android", targetArchName(.x86).?);
-    try std.testing.expectEqualStrings("riscv64-linux-android", targetArchName(.riscv64).?);
-    try std.testing.expect(targetArchName(.mips) == null);
+    const x86 = archNames(.x86).?;
+    try std.testing.expectEqualStrings("i686-linux-android", x86.triple);
+    try std.testing.expectEqualStrings("i686", x86.builtins);
+    try std.testing.expectEqualStrings("i386", x86.unwind);
+
+    try std.testing.expectEqualStrings("x86_64-linux-android", archNames(.x86_64).?.triple);
+    try std.testing.expectEqualStrings("riscv64-linux-android", archNames(.riscv64).?.triple);
+    try std.testing.expect(archNames(.mips) == null);
 }
 
 test "Android macros" {
@@ -431,56 +338,18 @@ test "Android macros" {
     try std.testing.expectEqualStrings("34", m[2].value.?);
 }
 
-test "compiler-rt arch names" {
-    try std.testing.expectEqualStrings("aarch64", builtinsName(.aarch64).?);
-    try std.testing.expectEqualStrings("x86_64", builtinsName(.x86_64).?);
-    try std.testing.expectEqualStrings("i686", builtinsName(.x86).?);
-    try std.testing.expectEqualStrings("arm", builtinsName(.arm).?);
-    try std.testing.expectEqualStrings("arm", builtinsName(.thumb).?);
-    try std.testing.expectEqualStrings("riscv64", builtinsName(.riscv64).?);
-    try std.testing.expect(builtinsName(.mips) == null);
-}
+test "merged dir names are scoped to arch + api + sysroot" {
+    const allocator = std.testing.allocator;
+    const aarch64_35 = mergedDirName(allocator, "aarch64", 35, "/ndk");
+    defer allocator.free(aarch64_35);
+    const aarch64_36 = mergedDirName(allocator, "aarch64", 36, "/ndk");
+    defer allocator.free(aarch64_36);
+    const other_ndk = mergedDirName(allocator, "aarch64", 35, "/other-ndk");
+    defer allocator.free(other_ndk);
+    const riscv64 = mergedDirName(allocator, "riscv64", 35, "/ndk");
+    defer allocator.free(riscv64);
 
-test "unwind dir names" {
-    try std.testing.expectEqualStrings("aarch64", unwindDir(.aarch64).?);
-    try std.testing.expectEqualStrings("x86_64", unwindDir(.x86_64).?);
-    try std.testing.expectEqualStrings("i386", unwindDir(.x86).?);
-    try std.testing.expectEqualStrings("arm", unwindDir(.arm).?);
-    try std.testing.expectEqualStrings("arm", unwindDir(.thumb).?);
-    try std.testing.expectEqualStrings("riscv64", unwindDir(.riscv64).?);
-    try std.testing.expect(unwindDir(.mips) == null);
-}
-
-test "arch name sets agree" {
-    const supported = [_]std.Target.Cpu.Arch{ .aarch64, .x86_64, .x86, .arm, .thumb, .riscv64 };
-    for (supported) |arch| {
-        try std.testing.expect(targetArchName(arch) != null);
-        try std.testing.expect(builtinsName(arch) != null);
-        try std.testing.expect(unwindDir(arch) != null);
-    }
-
-    try std.testing.expect(targetArchName(.mips) == null);
-    try std.testing.expect(builtinsName(.mips) == null);
-    try std.testing.expect(unwindDir(.mips) == null);
-}
-
-test "copyIfMissing copies once and preserves existing" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const io = std.testing.io;
-
-    try tmp.dir.writeFile(io, .{ .sub_path = "src.txt", .data = "payload" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "exists.txt", .data = "original" });
-
-    try std.testing.expect(copyIfMissing(io, tmp.dir, "src.txt", tmp.dir, "dst.txt"));
-    const copied = try tmp.dir.readFileAlloc(io, "dst.txt", std.testing.allocator, .limited(64));
-    defer std.testing.allocator.free(copied);
-    try std.testing.expectEqualStrings("payload", copied);
-
-    try std.testing.expect(copyIfMissing(io, tmp.dir, "src.txt", tmp.dir, "exists.txt"));
-    const unchanged = try tmp.dir.readFileAlloc(io, "exists.txt", std.testing.allocator, .limited(64));
-    defer std.testing.allocator.free(unchanged);
-    try std.testing.expectEqualStrings("original", unchanged);
-
-    try std.testing.expect(!copyIfMissing(io, tmp.dir, "missing.txt", tmp.dir, "dst2.txt"));
+    try std.testing.expect(!std.mem.eql(u8, aarch64_35, aarch64_36));
+    try std.testing.expect(!std.mem.eql(u8, aarch64_35, other_ndk));
+    try std.testing.expect(!std.mem.eql(u8, aarch64_35, riscv64));
 }

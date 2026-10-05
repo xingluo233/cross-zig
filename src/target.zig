@@ -8,7 +8,6 @@ fn PlatformConfig(comptime Paths: type) type {
     return struct {
         paths: Paths,
         libc_file: std.Build.LazyPath,
-        api_level: ?[]const u8 = null,
     };
 }
 
@@ -48,11 +47,10 @@ pub const TargetConfig = union(enum) {
                     paths.include,
                     paths.include_arch,
                     paths.static_lib_dir,
+                    paths.static_lib_dir,
                     "android-libc.conf",
                 );
-
-                const api_level_str = b.fmt("{}", .{target.result.os.version_range.linux.android});
-                return .{ .android = .{ .paths = paths, .libc_file = libc_file, .api_level = api_level_str } };
+                return .{ .android = .{ .paths = paths, .libc_file = libc_file } };
             },
 
             .ohos => {
@@ -67,11 +65,13 @@ pub const TargetConfig = union(enum) {
                     b,
                     paths.include,
                     paths.include_arch,
+                    paths.crt_shim_dir orelse paths.builtins_dir orelse paths.lib,
                     paths.lib,
                     "ohos-libc.conf",
                 );
                 return .{ .ohos = .{ .paths = paths, .libc_file = libc_file } };
             },
+
             .emscripten => {
                 const paths = try emscripten.resolvePaths(b, target, options.emsdk_sysroot);
                 const libc_file = try platform.createLibCConfig(
@@ -79,18 +79,13 @@ pub const TargetConfig = union(enum) {
                     paths.include,
                     paths.include,
                     paths.lib,
+                    paths.lib,
                     "emscripten-libc.conf",
                 );
                 return .{ .emscripten = .{ .paths = paths, .libc_file = libc_file } };
             },
-            .native => return .native,
-        }
-    }
 
-    pub fn deinit(self: TargetConfig, allocator: std.mem.Allocator) void {
-        switch (self) {
-            .native => {},
-            inline else => |config| config.paths.deinit(allocator),
+            .native => return .native,
         }
     }
 
@@ -103,7 +98,7 @@ pub const TargetConfig = union(enum) {
             .native => {},
             .android => |config| {
                 android.configureTranslateC(translate_c, config.paths);
-                platform.applyTranslateCMacros(translate_c, &android.macros(config.api_level.?));
+                platform.applyTranslateCMacros(translate_c, &android.macros(config.paths.api_level));
             },
             .ohos => |config| {
                 ohos.configureTranslateC(translate_c, config.paths);
@@ -121,11 +116,11 @@ pub const TargetConfig = union(enum) {
             .native => {},
             .android => |config| {
                 android.configureCompile(compile, config.paths, config.libc_file);
-                platform.applyCompileMacros(compile, &android.macros(config.api_level.?));
+                platform.applyCompileMacros(compile, &android.macros(config.paths.api_level));
             },
             .ohos => |config| {
                 ohos.configureCompile(compile, config.paths, config.libc_file);
-                platform.applyCompileMacros(compile, ohos.macros(compile.root_module.optimize orelse .Debug));
+                platform.applyCompileMacros(compile, ohos.macros(compile.root_module.optimize orelse .debug));
             },
             .emscripten => |config| {
                 emscripten.configureCompile(compile, config.paths, config.libc_file);
