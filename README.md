@@ -56,13 +56,20 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
-    exe.root_module.addCSourceFile(.{ .file = b.path("src/main.c"), .flags = &.{} });
+    exe.root_module.addCSourceFile(.{
+        .file = b.path("src/main.c"),
+        .flags = &.{},
+    });
 
     // 配置编译（include 路径、库路径、libc 配置、宏、crt/运行时补丁）
     config.configureCompile(exe);
 
     // 需要 translate-c 时同样配置
-    const tc = b.addTranslateC(.{ .root_source_file = b.path("src/headers.h"), .target = target, .optimize = optimize });
+    const tc = b.addTranslateC(.{
+        .root_source_file = b.path("src/headers.h"),
+        .target = target,
+        .optimize = optimize,
+    });
     config.configureTranslateC(tc);
 
     b.installArtifact(exe);
@@ -96,7 +103,7 @@ pub fn isNative(self: TargetConfig) bool
 ```
 
 - `configureCompile` 会添加：系统 include 路径、库搜索路径、libc 配置文件（`setLibCFile`）、
-  平台宏（`_FORTIFY_SOURCE`/`__ANDROID_API__`/`__MUSL__`/`__EMSCRIPTEN__` 等）、以及针对各端
+  平台宏（`_FORTIFY_SOURCE`/`__ANDROID_API__`/`__MUSL__` 等）、以及针对各端
   的 crt / 运行时补丁。
 - 链接系统库时一律显式 `use_pkg_config = .no`：Android 的 `unwind`/`builtins`/`atomic` 和 OHOS 的
   `clang_rt.builtins` 都来自 NDK，而不是宿主机。`linkSystemLibrary` 的默认值是 `.yes`，宿主机只要
@@ -132,12 +139,25 @@ pub const Options = struct {
 - **静态 libc 布局适配**：zig 链接静态 bionic 时，lld 的库搜索路径来自 libc 配置的 `crt_dir`
   加上 cross 显式添加的 `-L`；而 NDK 把静态档案（`libc.a`/`libm.a`/`libdl.a`）、crt 对象
   （`crtbegin_static.o` 等）和 `libunwind.a` / compiler-rt builtins 分散在两三个目录。
-  cross 会自动在构建根目录的 `.zig-cache/tmp` 下生成一个 **合并目录**
-  （`.zig-cache/tmp/cross-android-<arch>-<api>-<hash>/`）。该路径始终按构建根目录解析，
-  即使通过 `zig build --build-file <路径>/build.zig` 从其它目录调用，也指向同一位置。
-  合并目录把 crt 对象、静态 libc 档案、`libunwind.a`、重命名后的 `libbuiltins.a`
-  （compiler-rt）以及 `libatomic.a` 合一，同时链接 `unwind`/`builtins`/`atomic`。
+  cross 用一个 `WriteFile` 步骤把这些文件合并到一个 **生成目录**：目录位置由 Zig 的缓存
+  管理决定（默认 `<构建根>/.zig-cache/o/<hash>/`，`--cache-dir` / `ZIG_LOCAL_CACHE_DIR`
+  会自动生效），配置阶段不再直接读写本地缓存。合并目录把 crt 对象、静态 libc 档案、
+  `libunwind.a`、重命名后的 `libbuiltins.a`（compiler-rt）以及 `libatomic.a` 合一，
+  同时链接 `unwind`/`builtins`/`atomic`。
 - 产物为静态链接 libc 的可执行文件（EXEC），可直接在设备上运行，也可改为 napi `.so` 供应用加载。
+- **Windows 上链接 NDK 共享库的临时办法**：zig 0.17.0 会把 `-L` 中匹配到的 `.so` 以
+  `-l:<绝对路径>` 传给 lld，Windows 盘符里的冒号让 lld 报
+  `unable to find library -l:D:\...\liblog.so`。这是 zig 的上游 bug（
+  [issue #37257](https://codeberg.org/ziglang/zig/issues/37257)，预计 0.17.1 修复），不是 cross
+  的行为。修复前可以用 `addObjectFile` 直接链接 `.so` 作为临时方案：
+
+  ```zig
+  exe.root_module.addObjectFile(b.graph.cwdRelativePath(
+      b.pathJoin(&.{ android_config.paths.lib_api, "liblog.so" }),
+  ));
+  ```
+
+  静态库（`.a`）不受影响，`linkSystemLibrary` 可以继续正常用于它们。
 
 ### OpenHarmony
 
@@ -160,15 +180,18 @@ pub const Options = struct {
 ### Emscripten
 
 - **必须先由 emcc 生成 cache sysroot**：cross 只接受完整的
-  `$EMSDK/upstream/emscripten/cache/sysroot`（`include/` + `lib/<triple>/`，含 `crt1.o`）。
+  `$EMSDK/upstream/emscripten/cache/sysroot`（`include/` + `lib/<triple>/`）。
   未运行过 `emcc`（或 cache 不完整）会直接报错：
   ```powershell
   emcc -v    # 任何一次调用即可生成 cache sysroot
   ```
 - 路径解析顺序：`Options.emsdk_sysroot` > `$EMSDK/upstream/emscripten/cache/sysroot`；
   显式 sysroot 同样要求 `include/` 与 `lib/<triple>/` 完整。
-- `crt1.o`（若存在）会被自动链接到可执行产物。
-- 宏：`__EMSCRIPTEN__=1`。wasm 目标建议跳过可执行产物，以 object 形式交付（见 tests/smoke）。
+- **只支持 object / 静态库**：Zig 的 wasm libc 不提供 Emscripten `crt1.o` 需要的符号
+  （例如 `exit`），所以 cross 无法链接 Emscripten 可执行产物；构建 `.exe` / `.test` 目标会
+  直接给出明确错误。需要可执行文件时请先用 `zig build` 产出 object，再用 `emcc` 链接。
+  `tests/smoke` 在 emscripten 下正是以 object 形式交付。
+- 宏：不需要额外注入，`__EMSCRIPTEN__` 由 Zig 目标本身定义。
 - **不要为 wasm 目标构建 `dynamic` 库**：wasm-ld 对 `-shared` 只会给一句
   "creating shared libraries, with -shared, is not yet stable" 警告，而 zig 会把这段 lld
   stderr 当成错误、把对应 step 标记为 failure —— 但 `zig build` 的**退出码仍然是 0**。
@@ -207,7 +230,7 @@ zig build test     # 或 zig test src/tests.zig
 ```
 
 覆盖：目标分类（`classify`）、各平台 triple/架构名、宏定义、clang 版本解析与排序、
-文件系统 helper、工具链版本目录探测、静态库合并的复制语义等（19 个测试）。需要真实 SDK 的
+文件系统 helper、工具链版本目录探测等（17 个测试）。需要真实 SDK 的
 路径探测通过 `tests/smoke` 在相应机器上验证。
 
 ## 目录结构
@@ -218,9 +241,10 @@ build.zig.zon      # 包定义：名称、版本（发版 tag 需与之一致）
 src/
   target.zig       # 目标分类、TargetConfig 联合类型、宏注入
   platform.zig     # 公共逻辑：libc.conf 生成、目录检查、版本解析
+  libc_conf.zig    # 构建期小工具：在 make 阶段渲染 *-libc.conf
   android.zig      # Android NDK：路径解析、API 规则、静态 libc 合并目录
   ohos.zig         # OpenHarmony：sysroot 解析、clang builtins 探测
-  emscripten.zig   # Emscripten：cache sysroot 解析、crt1 链接
+  emscripten.zig   # Emscripten：cache sysroot 解析、仅支持 object/静态库
   tests.zig        # 测试聚合入口
 tests/smoke/         # 端到端验证示例（C 源 + 多目标构建）
 scripts/
@@ -230,11 +254,30 @@ scripts/
   release.yml      # 自动发版：v* 标签触发，打包源码并发布变更说明
 ```
 
+## 构建缓存与 SDK 变更
+
+- cross 的配置阶段只读地探测 SDK；探测到的目录（SDK 根、`lib/clang` 版本目录、
+  `lib/linux/<arch>`、API level 目录等）通过 Zig 的 `dependOnDirectoryMetadata` 登记为
+  配置依赖，目录条目变化（新增 API level、clang 版本目录、`libatomic.a` 出现等）会自动
+  触发重新配置。文件级变化由它们所在目录的条目跟踪，避免对不存在的可选文件登记依赖。
+- **环境变量本身不在 Zig 的配置缓存键里**。把 `ANDROID_NDK_HOME`、`OHOS_NDK_HOME` 或
+  `EMSDK` 换成另一套 SDK 后，如果旧 SDK 目录仍然存在且未变化，配置缓存可能继续指向旧路径。
+  此时用 `zig build --cache-poison=poisoned`（或删除 `.zig-cache`）强制重新配置。
+- 生成目录（Android 合并目录、OHOS crt shim、`*-libc.conf`）全部由 Zig 的缓存管理决定位置，
+  跟随 `--cache-dir` / `ZIG_LOCAL_CACHE_DIR`；配置阶段不再直接写本地缓存。
+- `*-libc.conf` 由 make 阶段的 helper 生成，其参数通过 `make_absolute = true` 交给 build
+  runner 解析。不支持把 Run 参数绝对化的 host 会收到明确的 `AbsolutePathRequired` 错误，
+  而不是写出一份路径错误的配置。
+- 不要把全局缓存放到 build root 内（例如 `ZIG_GLOBAL_CACHE_DIR=zig-pkg` 指向项目里的
+  `zig-pkg`）。相对形式的全局缓存路径会让 libunwind 等子编译的临时文件解析失败，报
+  `unable to make temporary file: Permission denied`；用默认全局缓存即可。
+
 ## 已知限制
 
 - `-Dtarget=aarch64-linux-ohos` 目前仍不可用：Zig 0.17 能解析该 ABI，但 `compiler_rt`
   需要的 `emutls` 会在 `std/c.zig` 报 `unsupported ABI`。
   请继续使用 `-Dohos` + `linux-musl`；待上游补全 `.ohos` 的 `pthread_mutex_t` 后即可切换。
 - Zig 0.17 要求 libc 配置里的 `cc_dir`（`crtbegin.o` / `crtend.o` 所在目录，**不是**库搜索
-  路径）。OHOS NDK 只提供 `clang_rt.crtbegin.o`，cross 会在构建根目录的
-  `.zig-cache/tmp/cross-ohos-crt-<triple>/` 下建一份改名副本。
+  路径）。OHOS NDK 只提供 `clang_rt.crtbegin.o`，cross 用一个 `WriteFile` 步骤在 Zig 管理的
+  缓存目录里生成改名副本（`crtbegin.o`/`crtend.o`/`crtbeginS.o`/`crtendS.o`），位置跟随
+  `--cache-dir`，配置阶段不再直接写本地缓存。

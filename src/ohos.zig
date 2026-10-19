@@ -10,7 +10,7 @@ pub const Paths = struct {
     include_arch: []const u8,
     lib: []const u8,
     builtins_dir: ?[]const u8 = null,
-    crt_shim_dir: ?[]const u8 = null,
+    crt_shim_dir: ?std.Build.LazyPath = null,
 };
 
 const macros_all = [_]platform.Macro{
@@ -41,6 +41,7 @@ fn resolveBuiltinsDir(b: *std.Build, sysroot: []const u8, triple: []const u8) ?[
     };
     const clang_root = b.pathJoin(&.{ sdk_root, "llvm", "lib", "clang" });
 
+    platform.trackDir(b, clang_root);
     const found = platform.findNewestVersionedSubdir(b.allocator, b.graph.io, clang_root, &.{ "lib", triple });
     if (found == null) {
         std.log.warn(
@@ -64,15 +65,14 @@ pub fn resolvePaths(b: *std.Build, target: std.Build.ResolvedTarget, sysroot: ?[
     const include = b.pathJoin(&.{ sysroot_path, "usr", "include" });
     const lib = b.pathJoin(&.{ sysroot_path, "usr", "lib", target_arch });
     const include_arch = b.pathJoin(&.{ sysroot_path, "usr", "include", target_arch });
-    try platform.checkDir(b.graph.io, include, "OHOS include directory");
-    try platform.checkDir(b.graph.io, lib, "OHOS library directory");
-    try platform.checkDir(b.graph.io, include_arch, "OHOS architecture include directory");
+    try platform.checkDirTracked(b, include, "OHOS include directory");
+    try platform.checkDirTracked(b, lib, "OHOS library directory");
+    try platform.checkDirTracked(b, include_arch, "OHOS architecture include directory");
 
     const builtins_dir = resolveBuiltinsDir(b, sysroot_path, target_arch);
 
-    const crt_shim_dir = if (builtins_dir) |dir| try platform.crtShimDir(
+    const crt_shim_dir = if (builtins_dir) |dir| platform.crtShimDir(
         b,
-        b.fmt("cross-ohos-crt-{s}", .{target_arch}),
         dir,
         &.{
             .{ .src = "clang_rt.crtbegin.o", .dst = "crtbegin.o" },
@@ -93,25 +93,26 @@ pub fn resolvePaths(b: *std.Build, target: std.Build.ResolvedTarget, sysroot: ?[
 
 fn resolveSysroot(b: *std.Build, explicit: ?[]const u8) Error![]const u8 {
     if (explicit) |path| {
-        try platform.checkDir(b.graph.io, path, "OpenHarmony sysroot (Options.ohos_sysroot)");
+        try platform.checkDirTracked(b, path, "OpenHarmony sysroot (Options.ohos_sysroot)");
         return path;
     }
 
     const ndk_home = try platform.requireEnvDir(b, "OHOS_NDK_HOME", "the OpenHarmony SDK native root");
     const sysroot = b.pathJoin(&.{ ndk_home, "sysroot" });
-    try platform.checkDir(b.graph.io, sysroot, "OHOS sysroot");
+    try platform.checkDirTracked(b, sysroot, "OHOS sysroot");
     return sysroot;
 }
 
 pub fn configureCompile(compile: *std.Build.Step.Compile, paths: Paths, libc_file: std.Build.LazyPath) void {
+    const graph = compile.step.owner.graph;
     platform.configureCompile(compile, .{
-        .include = paths.include,
-        .include_arch = paths.include_arch,
-        .lib = &.{paths.lib},
+        .include = graph.cwdRelativePath(paths.include),
+        .include_arch = graph.cwdRelativePath(paths.include_arch),
+        .lib = &.{graph.cwdRelativePath(paths.lib)},
     }, libc_file);
 
     if (paths.builtins_dir) |dir| {
-        compile.root_module.addLibraryPath(compile.step.owner.graph.cwdRelativePath(dir));
+        compile.root_module.addLibraryPath(graph.cwdRelativePath(dir));
 
         compile.root_module.linkSystemLibrary("clang_rt.builtins", .{
             .preferred_link_mode = .static,
@@ -121,9 +122,10 @@ pub fn configureCompile(compile: *std.Build.Step.Compile, paths: Paths, libc_fil
 }
 
 pub fn configureTranslateC(translate_c: *std.Build.Step.TranslateC, paths: Paths) void {
+    const graph = translate_c.step.owner.graph;
     platform.configureTranslateC(translate_c, .{
-        .include = paths.include,
-        .include_arch = paths.include_arch,
+        .include = graph.cwdRelativePath(paths.include),
+        .include_arch = graph.cwdRelativePath(paths.include_arch),
     });
 }
 

@@ -65,6 +65,27 @@ else
   echo "OK: cross-working-directory"
 fi
 
+echo ""
+echo "===== cache-dir ====="
+cd "$ROOT/tests/smoke"
+rm -rf .zig-cache smoke-cache zig-out
+logfile="${ROOT}/smoke-cache-dir.log"
+status=0
+zig build -Dtarget=aarch64-linux-android.35 --cache-dir smoke-cache \
+  2>&1 | tee "$logfile" || status=1
+if [ "$status" -ne 0 ] || log_failed "$logfile"; then
+  echo "FAILED: cache-dir"
+  failed="$failed cache-dir"
+elif [ -d .zig-cache ]; then
+  echo "FAILED: cache-dir (default .zig-cache was created; the configure phase must not write there)"
+  failed="$failed cache-dir-stray-cache"
+elif [ ! -d smoke-cache/o ]; then
+  echo "FAILED: cache-dir (smoke-cache/o is missing)"
+  failed="$failed cache-dir-missing-output"
+else
+  echo "OK: cache-dir"
+fi
+
 if [ -n "$failed" ]; then
   echo ""
   echo "FAILED targets:"

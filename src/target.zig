@@ -42,10 +42,10 @@ pub const TargetConfig = union(enum) {
         switch (classify(target.result, options.ohos)) {
             .android => {
                 const paths = try android.resolvePaths(b, target, options.android_sysroot);
-                const libc_file = try platform.createLibCConfig(
+                const libc_file = platform.createLibCConfig(
                     b,
-                    paths.include,
-                    paths.include_arch,
+                    b.graph.cwdRelativePath(paths.include),
+                    b.graph.cwdRelativePath(paths.include_arch),
                     paths.static_lib_dir,
                     paths.static_lib_dir,
                     "android-libc.conf",
@@ -61,12 +61,16 @@ pub const TargetConfig = union(enum) {
                     );
                 }
                 const paths = try ohos.resolvePaths(b, target, options.ohos_sysroot);
-                const libc_file = try platform.createLibCConfig(
+                const crt_dir: std.Build.LazyPath = paths.crt_shim_dir orelse blk: {
+                    if (paths.builtins_dir) |dir| break :blk b.graph.cwdRelativePath(dir);
+                    break :blk b.graph.cwdRelativePath(paths.lib);
+                };
+                const libc_file = platform.createLibCConfig(
                     b,
-                    paths.include,
-                    paths.include_arch,
-                    paths.crt_shim_dir orelse paths.builtins_dir orelse paths.lib,
-                    paths.lib,
+                    b.graph.cwdRelativePath(paths.include),
+                    b.graph.cwdRelativePath(paths.include_arch),
+                    crt_dir,
+                    b.graph.cwdRelativePath(paths.lib),
                     "ohos-libc.conf",
                 );
                 return .{ .ohos = .{ .paths = paths, .libc_file = libc_file } };
@@ -74,12 +78,12 @@ pub const TargetConfig = union(enum) {
 
             .emscripten => {
                 const paths = try emscripten.resolvePaths(b, target, options.emsdk_sysroot);
-                const libc_file = try platform.createLibCConfig(
+                const libc_file = platform.createLibCConfig(
                     b,
-                    paths.include,
-                    paths.include,
-                    paths.lib,
-                    paths.lib,
+                    b.graph.cwdRelativePath(paths.include),
+                    b.graph.cwdRelativePath(paths.include),
+                    b.graph.cwdRelativePath(paths.lib),
+                    b.graph.cwdRelativePath(paths.lib),
                     "emscripten-libc.conf",
                 );
                 return .{ .emscripten = .{ .paths = paths, .libc_file = libc_file } };
@@ -106,7 +110,6 @@ pub const TargetConfig = union(enum) {
             },
             .emscripten => |config| {
                 emscripten.configureTranslateC(translate_c, config.paths);
-                platform.applyTranslateCMacros(translate_c, &emscripten.macros());
             },
         }
     }
@@ -124,7 +127,6 @@ pub const TargetConfig = union(enum) {
             },
             .emscripten => |config| {
                 emscripten.configureCompile(compile, config.paths, config.libc_file);
-                platform.applyCompileMacros(compile, &emscripten.macros());
             },
         }
     }

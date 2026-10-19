@@ -11,9 +11,7 @@ pub const Error = platform.Error || error{
 
 pub const ArchNames = struct {
     triple: []const u8,
-
     builtins: []const u8,
-
     unwind: []const u8,
 };
 
@@ -33,7 +31,7 @@ pub const Paths = struct {
     include_arch: []const u8,
     lib_arch: []const u8,
     lib_api: []const u8,
-    static_lib_dir: []const u8,
+    static_lib_dir: std.Build.LazyPath,
 
     api_level: []const u8,
     has_atomic: bool = false,
@@ -81,9 +79,10 @@ pub fn resolvePaths(b: *std.Build, target: std.Build.ResolvedTarget, sysroot: ?[
     const api_level_str = b.fmt("{d}", .{api_level});
     const lib_api = b.pathJoin(&.{ lib_arch, api_level_str });
 
-    try platform.checkDir(b.graph.io, include, "Android include directory");
-    try platform.checkDir(b.graph.io, include_arch, "Android architecture include directory");
-    try platform.checkDir(b.graph.io, lib_arch, "Android architecture library");
+    try platform.checkDirTracked(b, include, "Android include directory");
+    try platform.checkDirTracked(b, include_arch, "Android architecture include directory");
+    try platform.checkDirTracked(b, lib_arch, "Android architecture library");
+    platform.trackDir(b, lib_api);
     if (!platform.dirExists(b.graph.io, lib_api)) {
         std.log.err("Android API library directory not found: {s}", .{lib_api});
         logAvailableApiDirs(b, lib_arch);
@@ -103,7 +102,7 @@ pub fn resolvePaths(b: *std.Build, target: std.Build.ResolvedTarget, sysroot: ?[
 }
 
 const Layout = struct {
-    dir: []const u8,
+    dir: std.Build.LazyPath,
     has_atomic: bool,
 };
 
@@ -139,6 +138,7 @@ fn clangLinuxLibDir(b: *std.Build, sysroot_path: []const u8) ?[]const u8 {
     const toolchain_root = std.Io.Dir.path.dirname(sysroot_path) orelse return null;
     const clang_root = b.pathJoin(&.{ toolchain_root, "lib", "clang" });
 
+    platform.trackDir(b, clang_root);
     const found = platform.findNewestVersionedSubdir(b.allocator, b.graph.io, clang_root, &.{ "lib", "linux" });
     if (found == null) {
         std.log.warn(
@@ -173,83 +173,61 @@ fn createMergedStaticLibDir(
     const io = b.graph.io;
 
     const clang_linux_path = clangLinuxLibDir(b, sysroot_path) orelse return Error.StaticLibDirUnavailable;
-    const dir_name = mergedDirName(b.allocator, arch.builtins, api_level, sysroot_path);
+    const builtins_src = b.fmt("libclang_rt.builtins-{s}-android.a", .{arch.builtins});
+    const unwind_lib_path = b.pathJoin(&.{ clang_linux_path, arch.unwind });
 
-    const cache_dir = try platform.openStagingDir(b);
-    defer cache_dir.close(io);
-    cache_dir.createDirPath(io, dir_name) catch |err| {
-        std.log.err("failed to create {s} in the local cache: {s}", .{ dir_name, @errorName(err) });
-        return Error.StaticLibDirUnavailable;
-    };
-
-    var lib_api_dir = std.Io.Dir.openDirAbsolute(io, lib_api, .{}) catch |err| {
-        std.log.err("failed to open the Android API library directory {s}: {s}", .{ lib_api, @errorName(err) });
-        return Error.StaticLibDirUnavailable;
-    };
-    defer lib_api_dir.close(io);
-    var lib_arch_dir = std.Io.Dir.openDirAbsolute(io, lib_arch, .{}) catch |err| {
-        std.log.err("failed to open the Android architecture library directory {s}: {s}", .{ lib_arch, @errorName(err) });
-        return Error.StaticLibDirUnavailable;
-    };
-    defer lib_arch_dir.close(io);
+    platform.trackDir(b, clang_linux_path);
+    platform.trackDir(b, unwind_lib_path);
 
     const crtbegin_in_api = platform.pathExists(io, b.pathJoin(&.{ lib_api, "crtbegin_static.o" }));
 
-    const clang_linux_dir = std.Io.Dir.openDirAbsolute(io, clang_linux_path, .{}) catch |err| {
-        std.log.err("failed to open the Android clang runtime directory {s}: {s}", .{ clang_linux_path, @errorName(err) });
-        return Error.StaticLibDirUnavailable;
-    };
-    defer clang_linux_dir.close(io);
+    const dir_name = mergedDirName(b.allocator, arch.builtins, api_level, sysroot_path);
 
-    const builtins_src = b.fmt("libclang_rt.builtins-{s}-android.a", .{arch.builtins});
-
-    const unwind_lib_path = b.pathJoin(&.{ clang_linux_path, arch.unwind });
-    var unwind_lib_dir = std.Io.Dir.openDirAbsolute(io, unwind_lib_path, .{}) catch |err| {
-        std.log.err("Android NDK unwind library dir not found at {s}: {s}", .{ unwind_lib_path, @errorName(err) });
-        return Error.StaticLibDirUnavailable;
-    };
-    defer unwind_lib_dir.close(io);
+    const wf = b.addWriteFiles();
+    wf.step.name = b.fmt("Merge Android static libs ({s})", .{dir_name});
 
     const copies = [_]struct {
-        src: std.Io.Dir,
+        src_dir: []const u8,
         name: []const u8,
         dst: ?[]const u8 = null,
     }{
-        .{ .src = if (crtbegin_in_api) lib_api_dir else lib_arch_dir, .name = "crtbegin_static.o" },
-        .{ .src = lib_api_dir, .name = "crtend_android.o" },
-        .{ .src = lib_api_dir, .name = "crtbegin_so.o" },
-        .{ .src = lib_api_dir, .name = "crtend_so.o" },
-        .{ .src = lib_api_dir, .name = "crtbegin_dynamic.o" },
-        .{ .src = lib_arch_dir, .name = "libc.a" },
-        .{ .src = lib_arch_dir, .name = "libm.a" },
-        .{ .src = lib_arch_dir, .name = "libdl.a" },
-        .{ .src = lib_api_dir, .name = "libc.so" },
-        .{ .src = lib_api_dir, .name = "libm.so" },
-        .{ .src = lib_api_dir, .name = "libdl.so" },
-        .{ .src = clang_linux_dir, .name = builtins_src, .dst = "libbuiltins.a" },
-        .{ .src = unwind_lib_dir, .name = "libunwind.a" },
+        .{ .src_dir = if (crtbegin_in_api) lib_api else lib_arch, .name = "crtbegin_static.o" },
+        .{ .src_dir = lib_api, .name = "crtend_android.o" },
+        .{ .src_dir = lib_api, .name = "crtbegin_so.o" },
+        .{ .src_dir = lib_api, .name = "crtend_so.o" },
+        .{ .src_dir = lib_api, .name = "crtbegin_dynamic.o" },
+        .{ .src_dir = lib_arch, .name = "libc.a" },
+        .{ .src_dir = lib_arch, .name = "libm.a" },
+        .{ .src_dir = lib_arch, .name = "libdl.a" },
+        .{ .src_dir = lib_api, .name = "libc.so" },
+        .{ .src_dir = lib_api, .name = "libm.so" },
+        .{ .src_dir = lib_api, .name = "libdl.so" },
+        .{ .src_dir = clang_linux_path, .name = builtins_src, .dst = "libbuiltins.a" },
+        .{ .src_dir = unwind_lib_path, .name = "libunwind.a" },
     };
 
     for (copies) |c| {
-        const dst_path = b.pathJoin(&.{ dir_name, c.dst orelse c.name });
-        platform.copyFileIfMissing(io, c.src, c.name, cache_dir, dst_path) catch |err| {
+        const src_path = b.pathJoin(&.{ c.src_dir, c.name });
+        if (!platform.pathExists(io, src_path)) {
             std.log.err(
-                "Android NDK piece required for libc linking is missing: '{s}' (arch {s}, API {d}): {s}",
-                .{ c.name, arch.builtins, api_level, @errorName(err) },
+                "Android NDK piece required for libc linking is missing: '{s}' (arch {s}, API {d})",
+                .{ src_path, arch.builtins, api_level },
             );
             return Error.StaticLibDirUnavailable;
-        };
+        }
+        _ = wf.addCopyFile(b.graph.cwdRelativePath(src_path), c.dst orelse c.name);
     }
 
-    const atomic_dst = b.pathJoin(&.{ dir_name, "libatomic.a" });
-    const has_atomic = if (platform.copyFileIfMissing(io, unwind_lib_dir, "libatomic.a", cache_dir, atomic_dst)) |_| true else |_| false;
+    const atomic_src = b.pathJoin(&.{ unwind_lib_path, "libatomic.a" });
+    const has_atomic = platform.pathExists(io, atomic_src);
+    if (has_atomic) _ = wf.addCopyFile(b.graph.cwdRelativePath(atomic_src), "libatomic.a");
 
-    return .{ .dir = platform.stagingPath(b, dir_name), .has_atomic = has_atomic };
+    return .{ .dir = wf.getDirectory(), .has_atomic = has_atomic };
 }
 
 fn resolveSysroot(b: *std.Build, explicit: ?[]const u8) Error![]const u8 {
     if (explicit) |path| {
-        try platform.checkDir(b.graph.io, path, "Android sysroot (Options.android_sysroot)");
+        try platform.checkDirTracked(b, path, "Android sysroot (Options.android_sysroot)");
         return path;
     }
 
@@ -266,15 +244,20 @@ fn resolveSysroot(b: *std.Build, explicit: ?[]const u8) Error![]const u8 {
     const sysroot = b.pathJoin(&.{
         ndk_home, "toolchains", "llvm", "prebuilt", b.fmt("{s}-{s}", .{ host_os, host_arch }), "sysroot",
     });
-    try platform.checkDir(b.graph.io, sysroot, "Android sysroot");
+    try platform.checkDirTracked(b, sysroot, "Android sysroot");
     return sysroot;
 }
 
 pub fn configureCompile(compile: *std.Build.Step.Compile, paths: Paths, libc_file: std.Build.LazyPath) void {
+    const graph = compile.step.owner.graph;
     platform.configureCompile(compile, .{
-        .include = paths.include,
-        .include_arch = paths.include_arch,
-        .lib = &.{ paths.lib_api, paths.lib_arch, paths.static_lib_dir },
+        .include = graph.cwdRelativePath(paths.include),
+        .include_arch = graph.cwdRelativePath(paths.include_arch),
+        .lib = &.{
+            graph.cwdRelativePath(paths.lib_api),
+            graph.cwdRelativePath(paths.lib_arch),
+            paths.static_lib_dir,
+        },
     }, libc_file);
 
     compile.root_module.linkSystemLibrary("unwind", .{ .use_pkg_config = .no });
@@ -285,9 +268,10 @@ pub fn configureCompile(compile: *std.Build.Step.Compile, paths: Paths, libc_fil
 }
 
 pub fn configureTranslateC(translate_c: *std.Build.Step.TranslateC, paths: Paths) void {
+    const graph = translate_c.step.owner.graph;
     platform.configureTranslateC(translate_c, .{
-        .include = paths.include,
-        .include_arch = paths.include_arch,
+        .include = graph.cwdRelativePath(paths.include),
+        .include_arch = graph.cwdRelativePath(paths.include_arch),
     });
 }
 

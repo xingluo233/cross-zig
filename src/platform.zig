@@ -2,9 +2,6 @@ const std = @import("std");
 
 pub const Error = error{
     SysrootNotFound,
-    LibCRenderFailed,
-    CacheDirUnavailable,
-    CrtShimUnavailable,
 };
 
 pub const Macro = struct {
@@ -13,9 +10,10 @@ pub const Macro = struct {
 };
 
 pub const Sysroot = struct {
-    include: []const u8,
-    include_arch: []const u8,
-    lib: []const []const u8 = &.{},
+    include: std.Build.LazyPath,
+
+    include_arch: ?std.Build.LazyPath = null,
+    lib: []const std.Build.LazyPath = &.{},
 };
 
 pub fn configureCompile(
@@ -23,19 +21,21 @@ pub fn configureCompile(
     sysroot: Sysroot,
     libc_file: std.Build.LazyPath,
 ) void {
-    const graph = compile.step.owner.graph;
-    compile.root_module.addSystemIncludePath(graph.cwdRelativePath(sysroot.include));
-    compile.root_module.addSystemIncludePath(graph.cwdRelativePath(sysroot.include_arch));
+    compile.root_module.addSystemIncludePath(sysroot.include);
+    if (sysroot.include_arch) |include_arch| {
+        compile.root_module.addSystemIncludePath(include_arch);
+    }
     for (sysroot.lib) |lib| {
-        compile.root_module.addLibraryPath(graph.cwdRelativePath(lib));
+        compile.root_module.addLibraryPath(lib);
     }
     compile.setLibCFile(libc_file);
 }
 
 pub fn configureTranslateC(translate_c: *std.Build.Step.TranslateC, sysroot: Sysroot) void {
-    const graph = translate_c.step.owner.graph;
-    translate_c.addSystemIncludePath(graph.cwdRelativePath(sysroot.include));
-    translate_c.addSystemIncludePath(graph.cwdRelativePath(sysroot.include_arch));
+    translate_c.addSystemIncludePath(sysroot.include);
+    if (sysroot.include_arch) |include_arch| {
+        translate_c.addSystemIncludePath(include_arch);
+    }
 }
 
 pub fn applyCompileMacros(compile: *std.Build.Step.Compile, macros: []const Macro) void {
@@ -52,55 +52,31 @@ pub fn applyTranslateCMacros(translate_c: *std.Build.Step.TranslateC, macros: []
 
 pub fn createLibCConfig(
     b: *std.Build,
-    include_dir: []const u8,
-    sys_include_dir: []const u8,
-    cc_dir: []const u8,
-    crt_dir: []const u8,
+    include_dir: std.Build.LazyPath,
+    sys_include_dir: std.Build.LazyPath,
+    cc_dir: std.Build.LazyPath,
+    crt_dir: std.Build.LazyPath,
     conf_name: []const u8,
-) Error!std.Build.LazyPath {
-    var writer = std.Io.Writer.Allocating.init(b.allocator);
-    defer writer.deinit();
+) std.Build.LazyPath {
+    const run = b.addRunArtifact(libcConfWriter(b));
 
-    const libc_installation = std.zig.LibCInstallation{
-        .include_dir = include_dir,
-        .sys_include_dir = sys_include_dir,
-        .cc_dir = cc_dir,
-        .crt_dir = crt_dir,
-    };
-
-    libc_installation.render(&writer.writer) catch |err| {
-        std.log.err("Failed to render {s} libc installation configuration: {s}", .{ conf_name, @errorName(err) });
-        return Error.LibCRenderFailed;
-    };
-
-    return b.addWriteFiles().add(conf_name, writer.written());
+    run.addDirectoryArg2(include_dir, .{ .make_absolute = true });
+    run.addDirectoryArg2(sys_include_dir, .{ .make_absolute = true });
+    run.addDirectoryArg2(cc_dir, .{ .make_absolute = true });
+    run.addDirectoryArg2(crt_dir, .{ .make_absolute = true });
+    return run.addOutputFileArg2(conf_name, .{ .make_absolute = true });
 }
 
-const local_cache_basename = ".zig-cache";
-const staging_basename = "tmp";
-
-pub fn openStagingDir(b: *std.Build) Error!std.Io.Dir {
-    const io = b.graph.io;
-    const cache_dir = b.root.root_dir.handle.createDirPathOpen(io, local_cache_basename, .{}) catch |err| {
-        std.log.err(
-            "unable to open the local cache directory '{s}': {s}",
-            .{ local_cache_basename, @errorName(err) },
-        );
-        return Error.CacheDirUnavailable;
-    };
-    defer cache_dir.close(io);
-
-    return cache_dir.createDirPathOpen(io, staging_basename, .{}) catch |err| {
-        std.log.err(
-            "unable to open the staging directory '{s}{c}{s}': {s}",
-            .{ local_cache_basename, std.Io.Dir.path.sep, staging_basename, @errorName(err) },
-        );
-        return Error.CacheDirUnavailable;
-    };
-}
-
-pub fn stagingPath(b: *std.Build, sub_path: []const u8) []const u8 {
-    return b.root.root_dir.join(b.allocator, &.{ local_cache_basename, staging_basename, sub_path }) catch @panic("OOM");
+fn libcConfWriter(b: *std.Build) *std.Build.Step.Compile {
+    const source = b.addWriteFiles().add("libc_conf.zig", @embedFile("libc_conf.zig"));
+    return b.addExecutable(.{
+        .name = "cross-libc-conf",
+        .root_module = b.createModule(.{
+            .root_source_file = source,
+            .target = b.graph.host,
+            .optimize = .debug,
+        }),
+    });
 }
 
 pub const CrtFileMapping = struct {
@@ -110,46 +86,15 @@ pub const CrtFileMapping = struct {
 
 pub fn crtShimDir(
     b: *std.Build,
-    dir_name: []const u8,
     source_dir: []const u8,
     mappings: []const CrtFileMapping,
-) Error![]const u8 {
-    const io = b.graph.io;
-
-    const cache_dir = try openStagingDir(b);
-    defer cache_dir.close(io);
-
-    const shim_dir = cache_dir.createDirPathOpen(io, dir_name, .{}) catch |err| {
-        std.log.err("failed to open the crt shim directory {s}: {s}", .{ dir_name, @errorName(err) });
-        return Error.CrtShimUnavailable;
-    };
-    defer shim_dir.close(io);
-
-    var src_dir = std.Io.Dir.openDirAbsolute(io, source_dir, .{}) catch |err| {
-        std.log.err("failed to open crt source directory {s}: {s}", .{ source_dir, @errorName(err) });
-        return Error.CrtShimUnavailable;
-    };
-    defer src_dir.close(io);
-
+) std.Build.LazyPath {
+    const wf = b.addWriteFiles();
+    wf.step.name = b.fmt("Copy crt shim ({s})", .{std.Io.Dir.path.basename(source_dir)});
     for (mappings) |mapping| {
-        copyFileIfMissing(io, src_dir, mapping.src, shim_dir, mapping.dst) catch |err| {
-            std.log.err("failed to copy {s} to {s}: {s}", .{ mapping.src, mapping.dst, @errorName(err) });
-            return Error.CrtShimUnavailable;
-        };
+        _ = wf.addCopyFile(b.graph.cwdRelativePath(b.pathJoin(&.{ source_dir, mapping.src })), mapping.dst);
     }
-
-    return stagingPath(b, dir_name);
-}
-
-pub fn copyFileIfMissing(
-    io: std.Io,
-    src_dir: std.Io.Dir,
-    src_name: []const u8,
-    dst_dir: std.Io.Dir,
-    dst_name: []const u8,
-) !void {
-    dst_dir.access(io, dst_name, .{}) catch
-        return std.Io.Dir.copyFile(src_dir, src_name, dst_dir, dst_name, io, .{});
+    return wf.getDirectory();
 }
 
 pub fn findNewestVersionedSubdir(
@@ -273,27 +218,6 @@ test "fs helpers on real paths" {
     try checkDir(io, root, "root");
 }
 
-test "copyFileIfMissing copies once and preserves existing" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const io = std.testing.io;
-
-    try tmp.dir.writeFile(io, .{ .sub_path = "src.txt", .data = "payload" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "exists.txt", .data = "original" });
-
-    try copyFileIfMissing(io, tmp.dir, "src.txt", tmp.dir, "dst.txt");
-    const copied = try tmp.dir.readFileAlloc(io, "dst.txt", std.testing.allocator, .limited(64));
-    defer std.testing.allocator.free(copied);
-    try std.testing.expectEqualStrings("payload", copied);
-
-    try copyFileIfMissing(io, tmp.dir, "src.txt", tmp.dir, "exists.txt");
-    const unchanged = try tmp.dir.readFileAlloc(io, "exists.txt", std.testing.allocator, .limited(64));
-    defer std.testing.allocator.free(unchanged);
-    try std.testing.expectEqualStrings("original", unchanged);
-
-    try std.testing.expectError(error.FileNotFound, copyFileIfMissing(io, tmp.dir, "missing.txt", tmp.dir, "dst2.txt"));
-}
-
 test "findNewestVersionedSubdir picks the newest complete match" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -346,6 +270,15 @@ pub fn requireEnvDir(b: *std.Build, env_var: []const u8, label: []const u8) Erro
         std.log.err("Environment variable '{s}' is not set (needed to locate {s}).", .{ env_var, label });
         return Error.SysrootNotFound;
     };
-    try checkDir(b.graph.io, value, env_var);
+    try checkDirTracked(b, value, env_var);
     return value;
+}
+
+pub fn trackDir(b: *std.Build, path: []const u8) void {
+    b.dependOnDirectoryMetadata(b.graph.cwdRelativePath(path));
+}
+
+pub fn checkDirTracked(b: *std.Build, path: []const u8, label: []const u8) Error!void {
+    trackDir(b, path);
+    return checkDir(b.graph.io, path, label);
 }
