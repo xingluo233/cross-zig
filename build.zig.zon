@@ -1,6 +1,6 @@
 .{
     .name = .cross,
-    .version = "1.0.1",
+    .version = "1.0.2",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x57131439c4540764,
     .dependencies = .{},
